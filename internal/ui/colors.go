@@ -1,3 +1,5 @@
+//go:build windows
+
 package ui
 
 // COLORREF creates a Windows color value (0x00BBGGRR)
