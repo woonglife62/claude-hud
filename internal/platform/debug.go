@@ -1,4 +1,4 @@
-package main
+package platform
 
 import (
 	"fmt"
@@ -43,41 +43,33 @@ func CloseLog() {
 	}
 }
 
+// DLL procs used by platform package only
+var (
+	user32Plat   = syscall.NewLazyDLL("user32.dll")
+	procMessageBox = user32Plat.NewProc("MessageBoxW")
+)
+
 // ShowMessageBox displays a Windows MessageBox for critical errors.
 // Use this sparingly - only for fatal startup errors.
 func ShowMessageBox(title, message string) {
-	procMessageBox := user32.NewProc("MessageBoxW")
+	titlePtr, _ := syscall.UTF16PtrFromString(title)
+	msgPtr, _ := syscall.UTF16PtrFromString(message)
 	procMessageBox.Call(
 		0,
-		uintptr(unsafe.Pointer(utf16Ptr(message))),
-		uintptr(unsafe.Pointer(utf16Ptr(title))),
+		uintptr(unsafe.Pointer(msgPtr)),
+		uintptr(unsafe.Pointer(titlePtr)),
 		0x00000010, // MB_ICONERROR
 	)
 }
 
 // ShowInfoBox displays an informational MessageBox.
 func ShowInfoBox(title, message string) {
-	procMessageBox := user32.NewProc("MessageBoxW")
+	titlePtr, _ := syscall.UTF16PtrFromString(title)
+	msgPtr, _ := syscall.UTF16PtrFromString(message)
 	procMessageBox.Call(
 		0,
-		uintptr(unsafe.Pointer(utf16Ptr(message))),
-		uintptr(unsafe.Pointer(utf16Ptr(title))),
+		uintptr(unsafe.Pointer(msgPtr)),
+		uintptr(unsafe.Pointer(titlePtr)),
 		0x00000040, // MB_ICONINFORMATION
 	)
-}
-
-// LogStructSizes logs the sizes of critical structs for debugging
-func LogStructSizes() {
-	Log("Struct sizes:")
-	Log("  WNDCLASSEX:       %d bytes (expect 80)", unsafe.Sizeof(WNDCLASSEX{}))
-	Log("  MSG:              %d bytes (expect 48)", unsafe.Sizeof(MSG{}))
-	Log("  PAINTSTRUCT:      %d bytes (expect 72)", unsafe.Sizeof(PAINTSTRUCT{}))
-	Log("  NOTIFYICONDATA:   %d bytes (expect 976)", unsafe.Sizeof(NOTIFYICONDATA{}))
-	Log("  TRACKMOUSEEVENT:  %d bytes (expect 24)", unsafe.Sizeof(TRACKMOUSEEVENT{}))
-	Log("  LOGFONT:          %d bytes (expect 92)", unsafe.Sizeof(LOGFONT{}))
-	Log("  POINT:            %d bytes (expect 8)", unsafe.Sizeof(POINT{}))
-	Log("  RECT:             %d bytes (expect 16)", unsafe.Sizeof(RECT{}))
-	Log("  GUID:             %d bytes (expect 16)", unsafe.Sizeof(GUID{}))
-	Log("  syscall.Handle:   %d bytes", unsafe.Sizeof(syscall.Handle(0)))
-	Log("  uintptr:          %d bytes", unsafe.Sizeof(uintptr(0)))
 }

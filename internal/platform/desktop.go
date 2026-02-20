@@ -1,8 +1,26 @@
-package main
+package platform
 
 import (
 	"syscall"
 	"unsafe"
+)
+
+// DLL procs used by desktop pinning
+var (
+	user32Desktop      = syscall.NewLazyDLL("user32.dll")
+	procFindWindow     = user32Desktop.NewProc("FindWindowW")
+	procFindWindowEx   = user32Desktop.NewProc("FindWindowExW")
+	procEnumWindows    = user32Desktop.NewProc("EnumWindows")
+	procSetParent      = user32Desktop.NewProc("SetParent")
+	procSendMessage    = user32Desktop.NewProc("SendMessageW")
+	procSetWindowPos   = user32Desktop.NewProc("SetWindowPos")
+)
+
+const (
+	SWP_NOMOVE     = 0x0002
+	SWP_NOSIZE     = 0x0001
+	SWP_NOACTIVATE = 0x0010
+	HWND_BOTTOM    = 1
 )
 
 // PinToDesktop pins the window behind desktop icons using the WorkerW technique.
@@ -15,9 +33,10 @@ import (
 // 4. Get the sibling WorkerW window after it
 // 5. Set our window as a child of that WorkerW
 func PinToDesktop(hwnd syscall.Handle) bool {
+	progmanClass, _ := syscall.UTF16PtrFromString("Progman")
 	// Find Progman (the Program Manager window)
 	progman, _, _ := procFindWindow.Call(
-		uintptr(unsafe.Pointer(utf16Ptr("Progman"))),
+		uintptr(unsafe.Pointer(progmanClass)),
 		0,
 	)
 	if progman == 0 {
@@ -30,19 +49,17 @@ func PinToDesktop(hwnd syscall.Handle) bool {
 	procSendMessage.Call(progman, 0x052C, 0xD, 1)
 
 	// Find the right WorkerW window.
-	// The desktop window hierarchy after 0x052C looks like:
-	//   Progman
-	//     └ SHELLDLL_DefView  (desktop icons)
-	//   WorkerW  ← this is where we want to put our window
-	//     └ (empty, behind the desktop icons)
 	var workerW uintptr
+
+	shellDefViewClass, _ := syscall.UTF16PtrFromString("SHELLDLL_DefView")
+	workerWClass, _ := syscall.UTF16PtrFromString("WorkerW")
 
 	enumCallback := syscall.NewCallback(func(topHwnd syscall.Handle, lParam uintptr) uintptr {
 		// Check if this top-level window has a SHELLDLL_DefView child
 		defView, _, _ := procFindWindowEx.Call(
 			uintptr(topHwnd),
 			0,
-			uintptr(unsafe.Pointer(utf16Ptr("SHELLDLL_DefView"))),
+			uintptr(unsafe.Pointer(shellDefViewClass)),
 			0,
 		)
 		if defView != 0 {
@@ -51,7 +68,7 @@ func PinToDesktop(hwnd syscall.Handle) bool {
 			h, _, _ := procFindWindowEx.Call(
 				0,                // parent = desktop
 				uintptr(topHwnd), // search after this window
-				uintptr(unsafe.Pointer(utf16Ptr("WorkerW"))),
+				uintptr(unsafe.Pointer(workerWClass)),
 				0,
 			)
 			workerW = h

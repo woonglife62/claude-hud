@@ -1,4 +1,4 @@
-package main
+package platform
 
 import (
 	"os"
@@ -7,12 +7,12 @@ import (
 )
 
 var (
-	advapi32             = syscall.NewLazyDLL("advapi32.dll")
-	procRegOpenKeyEx     = advapi32.NewProc("RegOpenKeyExW")
-	procRegSetValueEx    = advapi32.NewProc("RegSetValueExW")
-	procRegDeleteValue   = advapi32.NewProc("RegDeleteValueW")
-	procRegCloseKey      = advapi32.NewProc("RegCloseKey")
-	procRegQueryValueEx  = advapi32.NewProc("RegQueryValueExW")
+	advapi32            = syscall.NewLazyDLL("advapi32.dll")
+	procRegOpenKeyEx    = advapi32.NewProc("RegOpenKeyExW")
+	procRegSetValueEx   = advapi32.NewProc("RegSetValueExW")
+	procRegDeleteValue  = advapi32.NewProc("RegDeleteValueW")
+	procRegCloseKey     = advapi32.NewProc("RegCloseKey")
+	procRegQueryValueEx = advapi32.NewProc("RegQueryValueExW")
 )
 
 const (
@@ -25,7 +25,8 @@ const (
 const autoStartKeyPath = `SOFTWARE\Microsoft\Windows\CurrentVersion\Run`
 const autoStartValueName = "ClaudeHUD"
 
-func setAutoStart(enable bool) error {
+// SetAutoStart enables or disables auto-start on Windows login
+func SetAutoStart(enable bool) error {
 	keyPath, _ := syscall.UTF16PtrFromString(autoStartKeyPath)
 	var hKey syscall.Handle
 	ret, _, err := procRegOpenKeyEx.Call(
@@ -68,7 +69,8 @@ func setAutoStart(enable bool) error {
 	return nil
 }
 
-func isAutoStartEnabled() bool {
+// IsAutoStartEnabled checks if auto-start is configured
+func IsAutoStartEnabled() bool {
 	keyPath, _ := syscall.UTF16PtrFromString(autoStartKeyPath)
 	var hKey syscall.Handle
 	ret, _, _ := procRegOpenKeyEx.Call(
