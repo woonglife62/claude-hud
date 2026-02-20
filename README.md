@@ -1,115 +1,192 @@
 # Claude HUD
 
-Windows 데스크톱 오버레이로 Claude Code 세션 상태를 실시간 모니터링하는 네이티브 HUD 애플리케이션.
+Windows desktop overlay that monitors Claude Code session status in real-time. A native HUD application built with pure Go and Win32 API — no CGo, no frameworks.
 
-## 기능
+![Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue)
+![Go](https://img.shields.io/badge/Go-1.22+-00ADD8)
+![License](https://img.shields.io/badge/license-Private-lightgrey)
 
-- **실시간 사용량 모니터링** - Anthropic OAuth API를 통한 5시간/주간 토큰 사용량 추적
-- **세션 스캔** - `~/.claude/projects/` 디렉토리의 활성 JSONL 트랜스크립트 감지
-- **에이전트 라이프사이클 추적** - `tool_use` → `tool_result` 매칭으로 실행 중/완료 상태 표시
-- **OMC 전략 감지** - ralph, ultrawork, autopilot 등 활성 oh-my-claudecode 스킬 표시
-- **백그라운드 에이전트** - 비동기 에이전트 실행/완료 추적
-- **리사이즈 가능** - 드래그로 창 크기 조절, 최소 280x300
-- **화면 가장자리 스냅** - 모니터 경계에 자동 맞춤
-- **시스템 트레이** - 트레이 아이콘으로 표시/숨김 토글
-- **데스크톱 고정** - 바탕화면 배경에 고정 (Progman 자식 윈도우)
-- **비차단 갱신** - 백그라운드 고루틴에서 데이터 I/O, UI 스레드 차단 없음
-- **단일 인스턴스** - Named Mutex로 중복 실행 방지
+## Features
 
-## 빌드
+### Monitoring
+- **Real-time usage tracking** — 5-hour / weekly token usage via Anthropic OAuth API
+- **Model breakdown** — Per-model token usage (Opus / Sonnet / Haiku)
+- **Plan-aware limits** — Accurate token caps based on your subscription plan
+- **Usage trend indicator** — Consumption velocity arrows (fast/slow/stable)
+- **Session scanning** — Active JSONL transcript detection in `~/.claude/projects/`
+- **Agent lifecycle** — `tool_use` / `tool_result` matching for running/completed status
+- **OMC strategy detection** — Active oh-my-claudecode skill display (ralph, ultrawork, autopilot, etc.)
 
-### 요구사항
+### UI
+- **DPI-aware rendering** — Per-monitor DPI scaling (Windows 10+ `SetProcessDpiAwarenessContext`)
+- **Dark / Light theme** — Toggle via system tray menu
+- **Compact mode** — Minimal view showing only usage bars (~150px height)
+- **Resizable window** — Drag to resize, minimum 200x300
+- **Edge snapping** — Auto-snap to monitor edges
+- **Desktop pinning** — Pin to desktop background (Progman child window)
+- **i18n** — Korean (default) and English locale support
 
-- Go 1.21+
-- Windows 10/11
-- `windres` (MinGW 또는 MSYS2, 아이콘 임베딩용)
+### System Integration
+- **System tray** — Tray icon with show/hide toggle and context menu
+- **Usage notifications** — Balloon alerts at configurable thresholds (80%, 95%)
+- **Auto-start** — Windows registry-based auto-start on login
+- **Global hotkey** — `Ctrl+Shift+H` to toggle HUD visibility
+- **Single instance** — Named Mutex prevents duplicate processes
+- **GDI resource caching** — Brushes/pens created once, reused across frames
+- **Non-blocking refresh** — Background goroutine handles data I/O, no UI thread blocking
+- **OAuth error handling** — Graceful token expiry recovery with exponential backoff
 
-### 빌드 방법
+## Build
+
+### Requirements
+
+- Go 1.22+
+- Windows 10 / 11
+- `windres` (MinGW or MSYS2, for icon embedding — optional)
+
+### Quick Build
 
 ```bash
-# 아이콘 생성 + 리소스 컴파일 + 빌드
+# Build without icon
+go build -ldflags "-H windowsgui" -o claude-hud.exe
+
+# Build with icon (requires windres)
 make icon
 make build
-
-# 또는 아이콘 없이 빌드
-go build -ldflags "-H windowsgui" -o claude-hud.exe
 ```
 
-`-H windowsgui` 플래그는 콘솔 창 없이 GUI 앱으로 실행되게 합니다.
+The `-H windowsgui` flag ensures the app runs as a GUI application without a console window.
 
-### 아이콘 생성
+### Icon Generation
 
 ```bash
-# 수학적 렌더링으로 icon.ico 생성 (보라 원 + 흰색 C)
+# Generate icon.ico (purple circle + white C, mathematical rendering)
 go run tools/mkicon.go
 
-# 리소스 컴파일
+# Compile Windows resource
 windres resource.rc -o resource.syso
 ```
 
-## 실행
+### Make Targets
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Build `claude-hud.exe` with embedded icon |
+| `make icon` | Generate `icon.ico` + compile `resource.syso` |
+| `make clean` | Remove build artifacts |
+
+### Run Tests
+
+```bash
+go test ./...
+```
+
+## Run
 
 ```bash
 ./claude-hud.exe
 ```
 
-더블클릭으로 실행하거나, 시작 프로그램에 등록하여 자동 실행할 수 있습니다.
+Or double-click the executable. Enable "Start with Windows" from the tray menu for auto-launch.
 
-## 설정
+## Configuration
 
-설정 파일: `%AppData%/ClaudeHUD/config.json`
+Config file location: `%AppData%/ClaudeHUD/config.json`
 
-| 항목 | 기본값 | 설명 |
-|------|--------|------|
-| `x`, `y` | 100, 100 | 창 위치 |
-| `width`, `height` | 360, 640 | 창 크기 |
-| `opacity` | 204 (80%) | 투명도 (0-255) |
-| `refresh_ms` | 3000 | 데이터 갱신 주기 (ms) |
-| `pin_desktop` | true | 바탕화면에 고정 |
-| `dark_mode` | true | 다크 테마 |
+Window position and size are automatically saved on exit.
 
-창 위치와 크기는 종료 시 자동 저장됩니다.
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `x`, `y` | 100, 100 | Window position |
+| `width`, `height` | 360, 640 | Window size |
+| `opacity` | 204 (80%) | Transparency (0-255) |
+| `refresh_ms` | 3000 | Data refresh interval in ms |
+| `pin_desktop` | true | Pin to desktop background |
+| `theme_mode` | "dark" | Color theme: `"dark"` or `"light"` |
+| `auto_start` | false | Start with Windows login |
+| `notify_enabled` | true | Enable usage notifications |
+| `notify_threshold_1` | 0.80 | First notification threshold |
+| `notify_threshold_2` | 0.95 | Warning notification threshold |
+| `closed_retention_min` | 5 | Minutes to show closed sessions |
+| `language` | "ko" | UI language: `"ko"` or `"en"` |
+| `compact_mode` | false | Compact mode (usage bars only) |
 
-## 프로젝트 구조
+## Project Structure
 
 ```
 claude-hud/
-├── main.go          # 진입점, 단일 인스턴스, 패닉 복구
-├── window.go        # Win32 윈도우 관리, 메시지 루프, 비동기 갱신
-├── render.go        # GDI 더블버퍼 렌더링, 사용량 바, 세션 카드
-├── data.go          # 데이터 모델, API 호출, JSONL 파싱, 에이전트 추적
-├── config.go        # 설정 로드/저장
-├── tray.go          # 시스템 트레이 아이콘
-├── desktop.go       # 데스크톱 고정 (Progman)
-├── debug.go         # 진단 로깅
+├── main.go                          # Entry point, single instance, panic recovery
+├── internal/
+│   ├── config/
+│   │   ├── config.go                # Config struct, load/save, defaults, validation
+│   │   └── config_test.go           # Config round-trip tests
+│   ├── model/
+│   │   ├── types.go                 # HUDData, Session, Agent, UsageData, RateLimitWindow
+│   │   └── types_test.go            # Type helper tests
+│   ├── data/
+│   │   ├── api.go                   # OAuth API calls, usage cache, model breakdown, trends
+│   │   ├── scanner.go               # JSONL session scanning, mtime cache, incremental reads
+│   │   └── scanner_test.go          # Scanner and cache tests
+│   ├── ui/
+│   │   ├── winapi.go                # Win32 DLL procs and constants (user32, gdi32, kernel32, shell32)
+│   │   ├── window.go                # HUD window, message loop, DPI change handling, hotkey
+│   │   ├── render.go                # GDI double-buffer rendering, usage bars, session cards
+│   │   ├── tray.go                  # System tray icon, balloon notifications, context menu
+│   │   └── colors.go                # Dark/Light color schemes
+│   ├── i18n/
+│   │   └── i18n.go                  # Korean/English locale strings, SetLanguage()
+│   └── platform/
+│       ├── autostart.go             # Windows registry auto-start (advapi32)
+│       ├── desktop.go               # Desktop pinning (Progman)
+│       └── debug.go                 # Diagnostic logging, message box
 ├── tools/
-│   └── mkicon.go    # ICO 파일 생성기 (수학적 렌더링)
-├── resource.rc      # Windows 리소스 정의
-├── Makefile         # 빌드 자동화
-└── build.bat        # Windows 배치 빌드
+│   └── mkicon.go                    # ICO file generator (mathematical rendering)
+├── resource.rc                      # Windows resource definition
+├── Makefile                         # Build automation
+└── go.mod
 ```
 
-## 데이터 소스
+### Package Dependency Graph
 
-| 데이터 | 소스 | 방법 |
-|--------|------|------|
-| 사용량 | Anthropic OAuth API | `GET /api/oauth/usage` (Bearer 토큰) |
-| 사용량 (폴백) | OMC 캐시 | `~/.claude/plugins/oh-my-claudecode/.usage-cache.json` |
-| 플랜 정보 | 자격증명 | `~/.claude/.credentials.json` → `rateLimitTier` |
-| 세션 | JSONL 스캔 | `~/.claude/projects/*/\*.jsonl` (최근 30분 이내) |
-| 에이전트 | JSONL 파싱 | 최근 256KB 파싱, tool_use/tool_result 라이프사이클 추적 |
-| OMC 전략 | JSONL 파싱 | Skill tool_use 블록에서 마지막 활성 스킬 추출 |
+```
+main
+ ├── config      (no internal deps)
+ ├── model       (no internal deps)
+ ├── i18n        (no internal deps)
+ ├── platform    (no internal deps)
+ ├── data     → config, model, platform
+ └── ui       → config, model, data, platform, i18n
+```
 
-## 에이전트 표시
+No circular dependencies. `config`, `model`, `i18n`, and `platform` are leaf packages.
 
-세션 카드를 클릭하면 확장되어 상세 정보를 표시합니다:
+## Data Sources
 
-- **활성 전략** - `⚡ ralph`, `⚡ ultrawork` 등 현재 OMC 모드
-- **실행 중 에이전트** - 초록 ● + "실행 중" (tool_result 미수신)
-- **완료 에이전트** - 회색 ○ + "완료" (tool_result 수신)
-- **에이전트 정보** - 이름, 모델(sonnet/opus/haiku), 작업 설명
-- **Stale 감지** - 30분 초과 실행 에이전트는 자동으로 완료 처리
+| Data | Source | Method |
+|------|--------|--------|
+| Usage | Anthropic OAuth API | `GET /api/oauth/usage` (Bearer token) |
+| Usage (fallback) | OMC cache | `~/.claude/plugins/oh-my-claudecode/.usage-cache.json` |
+| Plan info | Credentials | `~/.claude/.credentials.json` → `rateLimitTier` |
+| Sessions | JSONL scan | `~/.claude/projects/*/*.jsonl` (mtime cache, incremental) |
+| Agents | JSONL parse | Last 256KB, `tool_use`/`tool_result` lifecycle tracking |
+| OMC strategy | JSONL parse | Skill `tool_use` blocks → last active skill |
 
-## 라이선스
+## Session Display
+
+Click a session card to expand and see details:
+
+- **Active strategy** — `⚡ ralph`, `⚡ ultrawork`, etc.
+- **Running agents** — Green dot + "Running" (awaiting `tool_result`)
+- **Completed agents** — Gray dot + "Done" (`tool_result` received)
+- **Agent info** — Name, model (sonnet/opus/haiku), task description
+- **Stale detection** — Agents running >30min are auto-marked as completed
+
+## Diagnostics
+
+Log file: `%AppData%/ClaudeHUD/claude-hud.log`
+
+The log includes Go runtime info, struct sizes, DPI state, and window lifecycle events.
+
+## License
 
 Private repository.
