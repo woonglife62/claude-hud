@@ -1,0 +1,25 @@
+# Build artifacts
+claude-hud.exe
+*.exe
+*.syso
+
+# Generated files
+icon.ico
+
+# Logs
+*.log
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Claude Code / OMC state
+.claude/
+.omc/
