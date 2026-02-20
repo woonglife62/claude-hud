@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -127,11 +128,23 @@ type UsageData struct {
 	TotalCost float64 // API cost (if applicable)
 }
 
+// DataSource indicates where usage data was obtained
+type DataSource int
+
+const (
+	DataSourceNone  DataSource = iota // no data available
+	DataSourceAPI                      // live from Anthropic API
+	DataSourceCache                    // from OMC usage cache fallback
+)
+
 // HUDData holds all data displayed in the HUD
 type HUDData struct {
-	Account  string
-	Usage    UsageData
-	Sessions []Session
+	Account        string
+	Usage          UsageData
+	Sessions       []Session
+	DataSource     DataSource // where usage data came from
+	LastAPISuccess time.Time  // last successful API fetch timestamp
+	APIFailCount   int        // consecutive API failures
 }
 
 // FormatTokens formats token count as human-readable string
@@ -217,6 +230,24 @@ type apiUsageResponse struct {
 
 // httpClient is a package-level client with a short timeout to avoid blocking the UI.
 var httpClient = &http.Client{Timeout: 3 * time.Second}
+
+// sessionScanResult holds the cached result of scanning a JSONL file.
+type sessionScanResult struct {
+	agents   []Agent
+	skill    *SkillInfo
+	messages int
+	model    string
+}
+
+// fileCache holds the cached scan result for a JSONL file keyed by path.
+type fileCache struct {
+	modTime  time.Time
+	fileSize int64
+	result   *sessionScanResult
+}
+
+var scanCacheMu sync.Mutex
+var scanCache = make(map[string]*fileCache)
 
 // fetchUsageFromAPI calls the Anthropic OAuth usage endpoint and returns the parsed
 // response, or nil on any error (network, auth, parse, missing token).
@@ -693,9 +724,223 @@ func extractToolResultText(content json.RawMessage, text string) string {
 	return ""
 }
 
+// scanSessionAgentsWithCache performs an incremental scan when possible.
+// If the file grew since last scan (cached != nil, newSize > cached.fileSize),
+// only the new bytes are read and merged with cached agents.
+// Otherwise falls back to a full scanSessionAgents call.
+func scanSessionAgentsWithCache(jsonlPath string, newSize int64, cached *fileCache) scanResult {
+	if cached == nil || newSize <= cached.fileSize {
+		return scanSessionAgents(jsonlPath)
+	}
+
+	f, err := os.Open(jsonlPath)
+	if err != nil {
+		return scanSessionAgents(jsonlPath)
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(cached.fileSize, 0); err != nil {
+		return scanSessionAgents(jsonlPath)
+	}
+
+	// Skip partial first line at seek boundary
+	buf := make([]byte, 1)
+	for {
+		n, readErr := f.Read(buf)
+		if readErr != nil || (n == 1 && buf[0] == '\n') {
+			break
+		}
+	}
+
+	raw, err := io.ReadAll(f)
+	if err != nil || len(raw) == 0 {
+		return scanResult{
+			Agents:       cached.result.agents,
+			ActiveSkill:  cached.result.skill,
+			SessionModel: cached.result.model,
+			MessageCount: cached.result.messages,
+		}
+	}
+
+	type agentEntry struct {
+		agentType   string
+		model       string
+		description string
+		status      string
+		startTime   time.Time
+	}
+
+	agentMap := make(map[string]*agentEntry)
+	for _, a := range cached.result.agents {
+		status := "completed"
+		if a.Status == StatusRunning {
+			status = "running"
+		}
+		agentMap["cached-"+a.Name] = &agentEntry{
+			agentType:   a.Name,
+			model:       a.Model,
+			description: a.Task,
+			status:      status,
+		}
+	}
+
+	bgAgentMap := make(map[string]string)
+	lastSkill := cached.result.skill
+	sessionModel := cached.result.model
+	messageCount := cached.result.messages
+
+	lines := strings.Split(string(raw), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry jsonlLine
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Type != "assistant" && entry.Type != "user" {
+			continue
+		}
+		if entry.Type == "assistant" {
+			messageCount++
+			if entry.Message.Model != "" {
+				sessionModel = entry.Message.Model
+			}
+		}
+		ts := parseISO(entry.Timestamp)
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+		for _, rawBlock := range entry.Message.Content {
+			var block contentBlock
+			if json.Unmarshal(rawBlock, &block) != nil {
+				continue
+			}
+			switch block.Type {
+			case "tool_use":
+				if block.Name == "Task" || block.Name == "proxy_Task" {
+					var input taskToolInput
+					if json.Unmarshal(block.Input, &input) == nil && input.SubagentType != "" {
+						agentMap[block.ID] = &agentEntry{
+							agentType:   input.SubagentType,
+							model:       input.Model,
+							description: input.Description,
+							status:      "running",
+							startTime:   ts,
+						}
+					}
+				} else if block.Name == "Skill" || block.Name == "proxy_Skill" {
+					var input skillToolInput
+					if json.Unmarshal(block.Input, &input) == nil && input.Skill != "" {
+						skillName := strings.TrimPrefix(input.Skill, "oh-my-claudecode:")
+						lastSkill = &SkillInfo{Name: skillName, Args: input.Args}
+					}
+				}
+			case "tool_result":
+				if block.ToolUseID == "" {
+					continue
+				}
+				contentStr := extractToolResultText(block.Content, block.Text)
+				if agent, ok := agentMap[block.ToolUseID]; ok {
+					if strings.Contains(contentStr, "Async agent launched") {
+						if idx := strings.Index(contentStr, "agentId:"); idx >= 0 {
+							rest := strings.TrimSpace(contentStr[idx+8:])
+							var bgID string
+							for _, ch := range rest {
+								if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') {
+									bgID += string(ch)
+								} else {
+									break
+								}
+							}
+							if bgID != "" {
+								bgAgentMap[bgID] = block.ToolUseID
+							}
+						}
+					} else {
+						agent.status = "completed"
+					}
+				}
+				if strings.Contains(contentStr, "<task_id>") && strings.Contains(contentStr, "<status>completed</status>") {
+					if start := strings.Index(contentStr, "<task_id>"); start >= 0 {
+						rest := contentStr[start+9:]
+						if end := strings.Index(rest, "</task_id>"); end >= 0 {
+							taskID := rest[:end]
+							if toolUseID, ok := bgAgentMap[taskID]; ok {
+								if agent, ok := agentMap[toolUseID]; ok {
+									agent.status = "completed"
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	now := time.Now()
+	staleThreshold := 30 * time.Minute
+	for _, agent := range agentMap {
+		if agent.status == "running" && !agent.startTime.IsZero() && now.Sub(agent.startTime) > staleThreshold {
+			agent.status = "completed"
+		}
+	}
+
+	var running, completed []*agentEntry
+	for _, agent := range agentMap {
+		if agent.status == "running" {
+			running = append(running, agent)
+		} else {
+			completed = append(completed, agent)
+		}
+	}
+	sort.Slice(running, func(i, j int) bool {
+		return running[i].startTime.After(running[j].startTime)
+	})
+	sort.Slice(completed, func(i, j int) bool {
+		return completed[i].startTime.After(completed[j].startTime)
+	})
+
+	maxAgents := 10
+	var resultAgents []Agent
+	for _, a := range running {
+		if len(resultAgents) >= maxAgents {
+			break
+		}
+		displayName := strings.TrimPrefix(a.agentType, "oh-my-claudecode:")
+		resultAgents = append(resultAgents, Agent{
+			Name:   displayName,
+			Model:  a.model,
+			Task:   a.description,
+			Status: StatusRunning,
+		})
+	}
+	remaining := maxAgents - len(resultAgents)
+	for i := 0; i < remaining && i < len(completed); i++ {
+		displayName := strings.TrimPrefix(completed[i].agentType, "oh-my-claudecode:")
+		resultAgents = append(resultAgents, Agent{
+			Name:   displayName,
+			Model:  completed[i].model,
+			Task:   completed[i].description,
+			Status: StatusIdle,
+		})
+	}
+
+	return scanResult{
+		Agents:       resultAgents,
+		ActiveSkill:  lastSkill,
+		SessionModel: sessionModel,
+		MessageCount: messageCount,
+	}
+}
+
 // scanSessions scans ~/.claude/projects/*/ for active JSONL transcript files.
 // Running = modified within last 5 min. Idle = modified within last 30 min.
+// Uses mtime caching to skip re-scanning unchanged files.
 func scanSessions(homeDir string) []Session {
+	scanStart := time.Now()
+
 	projectsDir := filepath.Join(homeDir, ".claude", "projects")
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
@@ -708,6 +953,9 @@ func scanSessions(homeDir string) []Session {
 
 	var sessions []Session
 	sessionID := 1
+
+	// Track which paths are still active so we can evict stale cache entries.
+	seenPaths := make(map[string]bool)
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -755,6 +1003,7 @@ func scanSessions(homeDir string) []Session {
 		// Extract agents and model from the newest JSONL file
 		var newestFile string
 		var newestFileMod time.Time
+		var newestFileSize int64
 		for _, f := range jsonlFiles {
 			info, err := os.Stat(f)
 			if err != nil {
@@ -762,10 +1011,46 @@ func scanSessions(homeDir string) []Session {
 			}
 			if info.ModTime().After(newestFileMod) {
 				newestFileMod = info.ModTime()
+				newestFileSize = info.Size()
 				newestFile = f
 			}
 		}
-		sr := scanSessionAgents(newestFile)
+
+		seenPaths[newestFile] = true
+
+		// Check mtime cache before scanning
+		scanCacheMu.Lock()
+		cached, hasCached := scanCache[newestFile]
+		scanCacheMu.Unlock()
+
+		var sr scanResult
+		if hasCached && cached.modTime.Equal(newestFileMod) {
+			// Cache hit: file unchanged, reuse result
+			sr = scanResult{
+				Agents:       cached.result.agents,
+				ActiveSkill:  cached.result.skill,
+				SessionModel: cached.result.model,
+				MessageCount: cached.result.messages,
+			}
+		} else {
+			// Cache miss or file changed: scan the file
+			sr = scanSessionAgentsWithCache(newestFile, newestFileSize, cached)
+
+			// Store result in cache
+			scanCacheMu.Lock()
+			scanCache[newestFile] = &fileCache{
+				modTime:  newestFileMod,
+				fileSize: newestFileSize,
+				result: &sessionScanResult{
+					agents:   sr.Agents,
+					skill:    sr.ActiveSkill,
+					model:    sr.SessionModel,
+					messages: sr.MessageCount,
+				},
+			}
+			scanCacheMu.Unlock()
+		}
+
 		model := sr.SessionModel
 		if model == "" {
 			model = "Claude"
@@ -786,6 +1071,16 @@ func scanSessions(homeDir string) []Session {
 		sessionID++
 	}
 
+	// Evict cache entries for paths no longer active
+	scanCacheMu.Lock()
+	for path := range scanCache {
+		if !seenPaths[path] {
+			delete(scanCache, path)
+		}
+	}
+	scanCacheMu.Unlock()
+
+	Log("scanSessions: %d sessions scanned in %v", len(sessions), time.Since(scanStart))
 	return sessions
 }
 
@@ -908,11 +1203,18 @@ func LoadRealData() *HUDData {
 	if homeDir != "" {
 		if apiResp := fetchUsageFromAPI(homeDir); apiResp != nil {
 			hud.Usage.Windows = buildWindowsFromAPI(apiResp, hud.Usage.Plan)
+			hud.DataSource = DataSourceAPI
+			hud.LastAPISuccess = time.Now()
+			hud.APIFailCount = 0
 			Log("  [usage] Source: API direct")
 		} else if cache := readUsageCache(homeDir); cache != nil {
 			hud.Usage.Windows = buildWindows(cache, hud.Usage.Plan)
+			hud.DataSource = DataSourceCache
+			hud.APIFailCount++
 			Log("  [usage] Source: OMC cache")
 		} else {
+			hud.DataSource = DataSourceNone
+			hud.APIFailCount++
 			Log("  [usage] Source: none (using defaults)")
 		}
 	}
@@ -948,8 +1250,10 @@ func LoadRealData() *HUDData {
 
 // RefreshResult holds results from a background data refresh.
 type RefreshResult struct {
-	Windows  []RateLimitWindow
-	Sessions []Session
+	Windows    []RateLimitWindow
+	Sessions   []Session
+	DataSource DataSource
+	APISuccess bool // true if API call succeeded
 }
 
 // FetchRefreshData performs all I/O for data refresh and returns the results.
@@ -965,8 +1269,13 @@ func FetchRefreshData(plan PlanType) RefreshResult {
 	// Try direct API first for near-real-time accuracy, fall back to cache
 	if apiResp := fetchUsageFromAPI(homeDir); apiResp != nil {
 		result.Windows = buildWindowsFromAPI(apiResp, plan)
+		result.DataSource = DataSourceAPI
+		result.APISuccess = true
 	} else if cache := readUsageCache(homeDir); cache != nil {
 		result.Windows = buildWindows(cache, plan)
+		result.DataSource = DataSourceCache
+	} else {
+		result.DataSource = DataSourceNone
 	}
 
 	// Re-scan sessions to detect new or closed ones
@@ -982,4 +1291,11 @@ func RefreshData(data *HUDData) {
 		data.Usage.Windows = result.Windows
 	}
 	data.Sessions = result.Sessions
+	data.DataSource = result.DataSource
+	if result.APISuccess {
+		data.LastAPISuccess = time.Now()
+		data.APIFailCount = 0
+	} else {
+		data.APIFailCount++
+	}
 }

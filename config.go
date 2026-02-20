@@ -14,8 +14,12 @@ type Config struct {
 	Height      int     `json:"height"`
 	Opacity     byte    `json:"opacity"`     // 0-255, default 204 (80%)
 	RefreshMs   int     `json:"refresh_ms"`  // data refresh interval
-	PinDesktop  bool    `json:"pin_desktop"` // pin to desktop background
-	DarkMode    bool    `json:"dark_mode"`
+	PinDesktop      bool    `json:"pin_desktop"` // pin to desktop background
+	DarkMode        bool    `json:"dark_mode"`
+	AutoStart       bool    `json:"auto_start"`
+	NotifyEnabled   bool    `json:"notify_enabled"`
+	NotifyThreshold1 float64 `json:"notify_threshold_1"` // default 0.80
+	NotifyThreshold2 float64 `json:"notify_threshold_2"` // default 0.95
 }
 
 // DefaultConfig returns the default configuration
@@ -27,8 +31,11 @@ func DefaultConfig() *Config {
 		Height:     640,
 		Opacity:    204, // ~80%
 		RefreshMs:  3000,
-		PinDesktop: true,
-		DarkMode:   true,
+		PinDesktop:       true,
+		DarkMode:         true,
+		NotifyEnabled:    true,
+		NotifyThreshold1: 0.80,
+		NotifyThreshold2: 0.95,
 	}
 }
 

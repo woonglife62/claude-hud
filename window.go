@@ -70,6 +70,7 @@ var (
 	procSaveDC                 = gdi32.NewProc("SaveDC")
 	procRestoreDC              = gdi32.NewProc("RestoreDC")
 	procIntersectClipRect      = gdi32.NewProc("IntersectClipRect")
+	procEllipse                = gdi32.NewProc("Ellipse")
 )
 
 // Window style constants
@@ -640,6 +641,8 @@ func wndProc(hwnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 				w.data.Usage.Windows = result.Windows
 			}
 			w.data.Sessions = result.Sessions
+			// Check usage thresholds and fire balloon notifications if needed
+			checkAndNotify(w.tray, w.data, w.cfg)
 			// Auto-clamp scroll after data refresh (session count may change)
 			maxScroll := w.calcMaxScroll()
 			if w.scrollY > maxScroll {

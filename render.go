@@ -25,6 +25,22 @@ type ColorScheme struct {
 	Divider       uint32
 }
 
+// GDICache holds pre-created GDI brushes and pens that are reused across render frames
+type GDICache struct {
+	// Brushes
+	brushBg           syscall.Handle
+	brushCard         syscall.Handle
+	brushProgressBg   syscall.Handle
+	brushProgressFill syscall.Handle
+	brushAccentOrange syscall.Handle
+	brushAccentRed    syscall.Handle
+	brushAccentGreen  syscall.Handle
+	brushAccentPurple syscall.Handle
+	// Pens
+	penCardBorder syscall.Handle
+	penDivider    syscall.Handle
+}
+
 var darkScheme = ColorScheme{
 	BgColor:       COLORREF(24, 24, 32),
 	CardColor:     COLORREF(36, 36, 50),
@@ -54,6 +70,7 @@ type Renderer struct {
 	fontBold  syscall.Handle
 	fontMono  syscall.Handle
 	fontIcon  syscall.Handle
+	cache     GDICache
 }
 
 // NewRenderer creates a new renderer for the given window
@@ -71,6 +88,29 @@ func NewRenderer(hwnd syscall.Handle, width, height int) *Renderer {
 	r.fontBold = createFont("Segoe UI Semibold", -13, 600)
 	r.fontMono = createFont("Cascadia Code", -12, 400)
 	r.fontIcon = createFont("Segoe UI", -12, 400)
+
+	// Create cached GDI brushes and pens from the color scheme
+	h, _, _ := procCreateSolidBrush.Call(uintptr(darkScheme.BgColor))
+	r.cache.brushBg = syscall.Handle(h)
+	h, _, _ = procCreateSolidBrush.Call(uintptr(darkScheme.CardColor))
+	r.cache.brushCard = syscall.Handle(h)
+	h, _, _ = procCreateSolidBrush.Call(uintptr(darkScheme.ProgressBg))
+	r.cache.brushProgressBg = syscall.Handle(h)
+	h, _, _ = procCreateSolidBrush.Call(uintptr(darkScheme.ProgressFill))
+	r.cache.brushProgressFill = syscall.Handle(h)
+	h, _, _ = procCreateSolidBrush.Call(uintptr(darkScheme.AccentOrange))
+	r.cache.brushAccentOrange = syscall.Handle(h)
+	h, _, _ = procCreateSolidBrush.Call(uintptr(darkScheme.AccentRed))
+	r.cache.brushAccentRed = syscall.Handle(h)
+	h, _, _ = procCreateSolidBrush.Call(uintptr(darkScheme.AccentGreen))
+	r.cache.brushAccentGreen = syscall.Handle(h)
+	h, _, _ = procCreateSolidBrush.Call(uintptr(darkScheme.AccentPurple))
+	r.cache.brushAccentPurple = syscall.Handle(h)
+
+	ph, _, _ := procCreatePen.Call(PS_SOLID, 1, uintptr(darkScheme.CardBorder))
+	r.cache.penCardBorder = syscall.Handle(ph)
+	ph, _, _ = procCreatePen.Call(PS_SOLID, 1, uintptr(darkScheme.Divider))
+	r.cache.penDivider = syscall.Handle(ph)
 
 	return r
 }
@@ -153,21 +193,17 @@ func (r *Renderer) Render(hdc syscall.Handle, data *HUDData, cfg *Config, scroll
 
 // drawBackground fills the window background and draws a border
 func (r *Renderer) drawBackground(hdc syscall.Handle, w, h int32) {
-	// Fill background
-	brush, _, _ := procCreateSolidBrush.Call(uintptr(darkScheme.BgColor))
+	// Fill background using cached brush
 	rect := RECT{0, 0, w, h}
-	procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&rect)), brush)
-	procDeleteObject.Call(brush)
+	procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&rect)), uintptr(r.cache.brushBg))
 
-	// Draw rounded border
-	pen, _, _ := procCreatePen.Call(PS_SOLID, 1, uintptr(darkScheme.CardBorder))
-	oldPen, _, _ := procSelectObject.Call(uintptr(hdc), pen)
+	// Draw rounded border using cached pen
+	oldPen, _, _ := procSelectObject.Call(uintptr(hdc), uintptr(r.cache.penCardBorder))
 	nullBrush, _, _ := procGetStockObject.Call(5) // HOLLOW_BRUSH
 	oldBrush, _, _ := procSelectObject.Call(uintptr(hdc), nullBrush)
 	procRoundRect.Call(uintptr(hdc), 0, 0, uintptr(w), uintptr(h), 12, 12)
 	procSelectObject.Call(uintptr(hdc), oldPen)
 	procSelectObject.Call(uintptr(hdc), oldBrush)
-	procDeleteObject.Call(pen)
 }
 
 // drawTitleBar draws the "Claude HUD" title, plan badge, refresh button, and account.
@@ -186,18 +222,14 @@ func (r *Renderer) drawTitleBar(hdc syscall.Handle, w, y int32, data *HUDData, r
 	refreshRect := RECT{refreshBtnX - 3, refreshBtnY - 2, refreshBtnX + refreshBtnW + 3, refreshBtnY + refreshBtnH + 2}
 
 	if refreshPressed {
-		// Pressed state: draw a rounded background + white icon
-		btnBrush, _, _ := procCreateSolidBrush.Call(uintptr(darkScheme.AccentPurple))
-		btnPen, _, _ := procCreatePen.Call(PS_SOLID, 1, uintptr(darkScheme.AccentPurple))
-		oldBr, _, _ := procSelectObject.Call(uintptr(hdc), btnBrush)
-		oldPn, _, _ := procSelectObject.Call(uintptr(hdc), btnPen)
+		// Pressed state: draw a rounded background + white icon using cached brush/pen
+		oldBr, _, _ := procSelectObject.Call(uintptr(hdc), uintptr(r.cache.brushAccentPurple))
+		oldPn, _, _ := procSelectObject.Call(uintptr(hdc), uintptr(r.cache.penCardBorder))
 		procRoundRect.Call(uintptr(hdc),
 			uintptr(refreshRect.Left), uintptr(refreshRect.Top),
 			uintptr(refreshRect.Right), uintptr(refreshRect.Bottom), 6, 6)
 		procSelectObject.Call(uintptr(hdc), oldBr)
 		procSelectObject.Call(uintptr(hdc), oldPn)
-		procDeleteObject.Call(btnBrush)
-		procDeleteObject.Call(btnPen)
 		procSelectObject.Call(uintptr(hdc), uintptr(r.fontTitle))
 		procSetTextColor.Call(uintptr(hdc), uintptr(darkScheme.TextPrimary))
 	} else {
@@ -235,12 +267,10 @@ func (r *Renderer) drawTitleBar(hdc syscall.Handle, w, y int32, data *HUDData, r
 
 // drawDivider draws a horizontal separator line
 func (r *Renderer) drawDivider(hdc syscall.Handle, x, y, x2 int32) {
-	pen, _, _ := procCreatePen.Call(PS_SOLID, 1, uintptr(darkScheme.Divider))
-	oldPen, _, _ := procSelectObject.Call(uintptr(hdc), pen)
+	oldPen, _, _ := procSelectObject.Call(uintptr(hdc), uintptr(r.cache.penDivider))
 	procMoveToEx.Call(uintptr(hdc), uintptr(x), uintptr(y), 0)
 	procLineTo.Call(uintptr(hdc), uintptr(x2), uintptr(y))
 	procSelectObject.Call(uintptr(hdc), oldPen)
-	procDeleteObject.Call(pen)
 }
 
 // drawUsageWindows draws each rate limit window (5h, daily, weekly)
@@ -249,6 +279,35 @@ func (r *Renderer) drawUsageWindows(hdc syscall.Handle, w, y int32, data *HUDDat
 	procSelectObject.Call(uintptr(hdc), uintptr(r.fontBold))
 	procSetTextColor.Call(uintptr(hdc), uintptr(darkScheme.AccentOrange))
 	r.drawString(hdc, "사용량", 16, y)
+
+	// Draw data source indicator dot after "사용량" header using cached brushes
+	var dotBrush syscall.Handle
+	var dotLabel string
+	switch data.DataSource {
+	case DataSourceAPI:
+		dotBrush = r.cache.brushAccentGreen
+	case DataSourceCache:
+		dotBrush = r.cache.brushAccentOrange
+		dotLabel = "캐시"
+	default:
+		dotBrush = r.cache.brushAccentRed
+		dotLabel = "오프라인"
+	}
+
+	nullPen, _, _ := procGetStockObject.Call(8) // NULL_PEN
+	oldDB, _, _ := procSelectObject.Call(uintptr(hdc), uintptr(dotBrush))
+	oldDP, _, _ := procSelectObject.Call(uintptr(hdc), nullPen)
+	dotX := int32(90) // after header text
+	dotY := y + 4
+	procEllipse.Call(uintptr(hdc), uintptr(dotX), uintptr(dotY), uintptr(dotX+8), uintptr(dotY+8))
+	procSelectObject.Call(uintptr(hdc), oldDB)
+	procSelectObject.Call(uintptr(hdc), oldDP)
+
+	if dotLabel != "" {
+		procSelectObject.Call(uintptr(hdc), uintptr(r.fontSmall))
+		procSetTextColor.Call(uintptr(hdc), uintptr(darkScheme.TextMuted))
+		r.drawTextStr(hdc, dotLabel, dotX+12, dotY-1, 60, DT_LEFT|DT_SINGLELINE|DT_NOPREFIX)
+	}
 
 	// Model name on the right
 	procSelectObject.Call(uintptr(hdc), uintptr(r.fontSmall))
@@ -267,17 +326,13 @@ func (r *Renderer) drawUsageWindows(hdc syscall.Handle, w, y int32, data *HUDDat
 
 // drawUsageWindowCard draws a single rate limit window with progress bar and reset timer
 func (r *Renderer) drawUsageWindowCard(hdc syscall.Handle, x, y, w int32, win RateLimitWindow) int32 {
-	// Card background
+	// Card background using cached brush and pen
 	cardH := int32(52)
-	brush, _, _ := procCreateSolidBrush.Call(uintptr(darkScheme.CardColor))
-	pen, _, _ := procCreatePen.Call(PS_SOLID, 1, uintptr(darkScheme.CardBorder))
-	oldBrush, _, _ := procSelectObject.Call(uintptr(hdc), brush)
-	oldPen, _, _ := procSelectObject.Call(uintptr(hdc), pen)
+	oldBrush, _, _ := procSelectObject.Call(uintptr(hdc), uintptr(r.cache.brushCard))
+	oldPen, _, _ := procSelectObject.Call(uintptr(hdc), uintptr(r.cache.penCardBorder))
 	procRoundRect.Call(uintptr(hdc), uintptr(x), uintptr(y), uintptr(x+w), uintptr(y+cardH), 6, 6)
 	procSelectObject.Call(uintptr(hdc), oldBrush)
 	procSelectObject.Call(uintptr(hdc), oldPen)
-	procDeleteObject.Call(brush)
-	procDeleteObject.Call(pen)
 
 	px := x + 10
 	py := y + 6
@@ -377,17 +432,13 @@ func (r *Renderer) drawSessionsSection(hdc syscall.Handle, w, y, maxH int32, dat
 
 // drawSessionCard draws a single session card with its agents
 func (r *Renderer) drawSessionCard(hdc syscall.Handle, x, y, w int32, session Session, expanded bool) int32 {
-	// Card background with rounded corners
+	// Card background with rounded corners using cached brush and pen
 	cardH := r.calcCardHeight(session, expanded)
-	brush, _, _ := procCreateSolidBrush.Call(uintptr(darkScheme.CardColor))
-	pen, _, _ := procCreatePen.Call(PS_SOLID, 1, uintptr(darkScheme.CardBorder))
-	oldBrush, _, _ := procSelectObject.Call(uintptr(hdc), brush)
-	oldPen, _, _ := procSelectObject.Call(uintptr(hdc), pen)
+	oldBrush, _, _ := procSelectObject.Call(uintptr(hdc), uintptr(r.cache.brushCard))
+	oldPen, _, _ := procSelectObject.Call(uintptr(hdc), uintptr(r.cache.penCardBorder))
 	procRoundRect.Call(uintptr(hdc), uintptr(x), uintptr(y), uintptr(x+w), uintptr(y+cardH), 8, 8)
 	procSelectObject.Call(uintptr(hdc), oldBrush)
 	procSelectObject.Call(uintptr(hdc), oldPen)
-	procDeleteObject.Call(brush)
-	procDeleteObject.Call(pen)
 
 	// Inner padding
 	px := x + 12
@@ -579,25 +630,23 @@ func (r *Renderer) drawProgressBar(hdc syscall.Handle, x, y, w, h int32, pct flo
 		pct = 1
 	}
 
-	// Background track
-	bgBrush, _, _ := procCreateSolidBrush.Call(uintptr(darkScheme.ProgressBg))
+	// Background track using cached brush
 	bgRect := RECT{x, y, x + w, y + h}
-	procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&bgRect)), bgBrush)
-	procDeleteObject.Call(bgBrush)
+	procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&bgRect)), uintptr(r.cache.brushProgressBg))
 
-	// Fill bar (color changes based on usage)
+	// Fill bar (color changes based on usage) using cached brushes
 	fillW := int32(float64(w) * pct)
 	if fillW > 0 {
-		fillColor := darkScheme.ProgressFill
+		var fillBrush syscall.Handle
 		if pct > 0.9 {
-			fillColor = darkScheme.AccentRed
+			fillBrush = r.cache.brushAccentRed
 		} else if pct > 0.7 {
-			fillColor = darkScheme.AccentOrange
+			fillBrush = r.cache.brushAccentOrange
+		} else {
+			fillBrush = r.cache.brushProgressFill
 		}
-		fillBrush, _, _ := procCreateSolidBrush.Call(uintptr(fillColor))
 		fillRect := RECT{x, y, x + fillW, y + h}
-		procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&fillRect)), fillBrush)
-		procDeleteObject.Call(fillBrush)
+		procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&fillRect)), uintptr(fillBrush))
 	}
 }
 
@@ -620,12 +669,33 @@ func (r *Renderer) drawTextStr(hdc syscall.Handle, s string, x, y, maxW int32, f
 		uintptr(unsafe.Pointer(&rect)), uintptr(flags))
 }
 
-// Cleanup releases all GDI font resources
+// Cleanup releases all GDI font and cached brush/pen resources
 func (r *Renderer) Cleanup() {
 	fonts := []syscall.Handle{r.fontTitle, r.fontBody, r.fontSmall, r.fontBold, r.fontMono, r.fontIcon}
 	for _, f := range fonts {
 		if f != 0 {
 			procDeleteObject.Call(uintptr(f))
+		}
+	}
+	brushes := []syscall.Handle{
+		r.cache.brushBg,
+		r.cache.brushCard,
+		r.cache.brushProgressBg,
+		r.cache.brushProgressFill,
+		r.cache.brushAccentOrange,
+		r.cache.brushAccentRed,
+		r.cache.brushAccentGreen,
+		r.cache.brushAccentPurple,
+	}
+	for _, b := range brushes {
+		if b != 0 {
+			procDeleteObject.Call(uintptr(b))
+		}
+	}
+	pens := []syscall.Handle{r.cache.penCardBorder, r.cache.penDivider}
+	for _, p := range pens {
+		if p != 0 {
+			procDeleteObject.Call(uintptr(p))
 		}
 	}
 }

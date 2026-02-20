@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -89,6 +92,8 @@ const (
 	ID_OPACITY_100 = 1004
 	ID_PIN_DESKTOP = 1005
 	ID_EXIT        = 1006
+	ID_AUTOSTART   = 1007
+	ID_NOTIFY      = 1008
 )
 
 // ClaudeHUD GUID - unique identifier for the notification icon.
@@ -104,6 +109,83 @@ var claudeHUDGUID = GUID{
 // TrayIcon manages the system tray icon
 type TrayIcon struct {
 	nid NOTIFYICONDATA
+}
+
+// notifyState tracks which threshold notifications have fired per window
+type notifyState struct {
+	fiveHourT1Fired   bool
+	fiveHourT2Fired   bool
+	weeklyT1Fired     bool
+	weeklyT2Fired     bool
+	lastFiveHourReset time.Time
+	lastWeeklyReset   time.Time
+}
+
+var notifyTracker notifyState
+
+// ShowBalloon shows a balloon notification from the tray icon
+func (t *TrayIcon) ShowBalloon(title, message string) {
+	titleUTF16 := syscall.StringToUTF16(title)
+	msgUTF16 := syscall.StringToUTF16(message)
+	for i := 0; i < len(titleUTF16) && i < 63; i++ {
+		t.nid.SzInfoTitle[i] = titleUTF16[i]
+	}
+	for i := 0; i < len(msgUTF16) && i < 255; i++ {
+		t.nid.SzInfo[i] = msgUTF16[i]
+	}
+	t.nid.UFlags |= NIF_INFO
+	t.nid.DwInfoFlags = 0x00000001 // NIIF_INFO
+	procShellNotifyIcon.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&t.nid)))
+	// Clear after showing
+	t.nid.UFlags &^= NIF_INFO
+}
+
+// checkAndNotify checks usage thresholds and fires balloon notifications as needed
+func checkAndNotify(tray *TrayIcon, data *HUDData, cfg *Config) {
+	if !cfg.NotifyEnabled || tray == nil {
+		return
+	}
+	for _, w := range data.Usage.Windows {
+		isFiveHour := strings.Contains(w.Label, "시간")
+		resetTime := w.ResetAt
+		usage := w.UsagePct
+
+		if isFiveHour {
+			// Check if window reset (clear fired flags)
+			if !resetTime.Equal(notifyTracker.lastFiveHourReset) {
+				notifyTracker.fiveHourT1Fired = false
+				notifyTracker.fiveHourT2Fired = false
+				notifyTracker.lastFiveHourReset = resetTime
+			}
+			remaining := FormatTimeRemaining(resetTime)
+			if usage >= cfg.NotifyThreshold2 && !notifyTracker.fiveHourT2Fired {
+				notifyTracker.fiveHourT2Fired = true
+				tray.ShowBalloon("Claude HUD - 사용량 경고",
+					fmt.Sprintf("5시간 사용량 %.0f%% 도달 (리셋: %s)", usage*100, remaining))
+			} else if usage >= cfg.NotifyThreshold1 && !notifyTracker.fiveHourT1Fired {
+				notifyTracker.fiveHourT1Fired = true
+				tray.ShowBalloon("Claude HUD - 사용량 알림",
+					fmt.Sprintf("5시간 사용량 %.0f%% (리셋: %s)", usage*100, remaining))
+			}
+		} else {
+			// Weekly window
+			if !resetTime.Equal(notifyTracker.lastWeeklyReset) {
+				notifyTracker.weeklyT1Fired = false
+				notifyTracker.weeklyT2Fired = false
+				notifyTracker.lastWeeklyReset = resetTime
+			}
+			remaining := FormatTimeRemaining(resetTime)
+			if usage >= cfg.NotifyThreshold2 && !notifyTracker.weeklyT2Fired {
+				notifyTracker.weeklyT2Fired = true
+				tray.ShowBalloon("Claude HUD - 사용량 경고",
+					fmt.Sprintf("주간 사용량 %.0f%% 도달 (리셋: %s)", usage*100, remaining))
+			} else if usage >= cfg.NotifyThreshold1 && !notifyTracker.weeklyT1Fired {
+				notifyTracker.weeklyT1Fired = true
+				tray.ShowBalloon("Claude HUD - 사용량 알림",
+					fmt.Sprintf("주간 사용량 %.0f%% (리셋: %s)", usage*100, remaining))
+			}
+		}
+	}
 }
 
 // createClaudeIcon creates a custom 16x16 icon with a purple "C" for the system tray.
@@ -307,6 +389,23 @@ func showTrayMenu(w *HUDWindow) {
 		uintptr(unsafe.Pointer(utf16Ptr("Pin to Desktop"))))
 	appendSeparator(hMenu)
 
+	// Auto-start on login option
+	autoStartFlags := uint32(MF_STRING)
+	if isAutoStartEnabled() {
+		autoStartFlags |= MF_CHECKED
+	}
+	procAppendMenu.Call(hMenu, uintptr(autoStartFlags), ID_AUTOSTART,
+		uintptr(unsafe.Pointer(utf16Ptr("Start with Windows"))))
+
+	// Notifications toggle
+	notifyFlags := uint32(MF_STRING)
+	if w.cfg.NotifyEnabled {
+		notifyFlags |= MF_CHECKED
+	}
+	procAppendMenu.Call(hMenu, uintptr(notifyFlags), ID_NOTIFY,
+		uintptr(unsafe.Pointer(utf16Ptr("알림"))))
+	appendSeparator(hMenu)
+
 	appendMenuItem(hMenu, ID_EXIT, "Exit")
 
 	// Get cursor position for menu placement
@@ -347,6 +446,11 @@ func showTrayMenu(w *HUDWindow) {
 		} else {
 			UnpinFromDesktop(w.hwnd)
 		}
+	case ID_AUTOSTART:
+		w.cfg.AutoStart = !w.cfg.AutoStart
+		setAutoStart(w.cfg.AutoStart)
+	case ID_NOTIFY:
+		w.cfg.NotifyEnabled = !w.cfg.NotifyEnabled
 	case ID_EXIT:
 		procPostMessage.Call(uintptr(w.hwnd), WM_CLOSE, 0, 0)
 	}
