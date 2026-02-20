@@ -4,18 +4,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
 var logFile *os.File
 
-// InitLog creates a log file next to the executable for diagnostics.
-// On Windows this is critical because -H windowsgui hides all stdout/stderr output.
-// TODO(cross-platform): On macOS/Linux, consider using ~/.local/share/claude-hud/
-// or XDG_DATA_HOME instead of writing next to the binary.
+// logDir returns the OS-appropriate directory for log files.
+func logDir() string {
+	switch runtime.GOOS {
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "Library", "Logs", "claude-hud")
+	case "linux":
+		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+			return filepath.Join(xdg, "claude-hud")
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".local", "share", "claude-hud")
+	default:
+		// Windows: write next to executable (critical for -H windowsgui)
+		exePath, _ := os.Executable()
+		return filepath.Dir(exePath)
+	}
+}
+
+// InitLog creates a log file in the OS-appropriate directory for diagnostics.
+// Windows: next to the executable (critical because -H windowsgui hides stdout/stderr).
+// macOS: ~/Library/Logs/claude-hud.log
+// Linux: $XDG_DATA_HOME/claude-hud/ or ~/.local/share/claude-hud/
 func InitLog() {
-	exePath, _ := os.Executable()
-	logPath := filepath.Join(filepath.Dir(exePath), "claude-hud.log")
+	dir := logDir()
+	os.MkdirAll(dir, 0755)
+	logPath := filepath.Join(dir, "claude-hud.log")
 	var err error
 	logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
